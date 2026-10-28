@@ -1,0 +1,48 @@
+### IntelliJ IDEA ###
+# workspace.xml 里保存着运行配置的环境变量（包括 API Key），整个 .idea 都不提交。
+.idea/
+*.iml
+/target/
+out/
+!**/src/main/**/out/
+!**/src/test/**/out/
+.kotlin
+
+### Eclipse ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+bin/
+!**/src/main/**/bin/
+!**/src/test/**/bin/
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+### VS Code ###
+.vscode/
+
+### Mac OS ###
+.DS_Store
+
+### agent4j 运行时产物（在项目目录里运行 agent 时生成） ###
+.env
+.env.*
+trace*/
+.memory/
+.tasks/
+.task_outputs/
+.transcripts/
+.workflows/
+.mailboxes/
+.mcp-logs/
+.mcp.json
+.scheduled_tasks.json*
