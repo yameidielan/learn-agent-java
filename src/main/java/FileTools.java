@@ -6,14 +6,16 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystems;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.PathMatcher;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.stream.Stream;
 
 /**
  * s02 的四个文件工具：read_file、write_file、edit_file、glob。
@@ -146,16 +148,15 @@ final class FileTools {
                 ? globVariants(glob).stream().map(variant -> FileSystems.getDefault().getPathMatcher("glob:" + variant)).toList()
                 : List.of();
         List<Path> files;
+        int[] unreadableDirs = {0};
         if (Files.isRegularFile(start)) {
             files = List.of(start);
         } else {
-            try (Stream<Path> walk = Files.walk(start)) {
-                files = walk.filter(Files::isRegularFile)
-                        .filter(path -> !root.relativize(path).toString().replace('\\', '/').matches("(.*/)?\\.git/.*"))
-                        .filter(path -> !isCredentialPath(root.relativize(path)))
-                        .filter(path -> filters.isEmpty() || filters.stream().anyMatch(matcher -> matcher.matches(root.relativize(path))))
-                        .sorted().toList();
-            }
+            files = regularFiles(start, unreadableDirs).stream()
+                    .filter(path -> !root.relativize(path).toString().replace('\\', '/').matches("(.*/)?\\.git/.*"))
+                    .filter(path -> !isCredentialPath(root.relativize(path)))
+                    .filter(path -> filters.isEmpty() || filters.stream().anyMatch(matcher -> matcher.matches(root.relativize(path))))
+                    .sorted().toList();
         }
 
         List<String> shown = new ArrayList<>();
@@ -218,7 +219,8 @@ final class FileTools {
             }
         }
 
-        String skippedNote = skipped == 0 ? "" : "\n（跳过 " + skipped + " 个非 UTF-8、过大或指向项目外的文件）";
+        String skippedNote = (skipped == 0 ? "" : "\n（跳过 " + skipped + " 个非 UTF-8、过大或指向项目外的文件）")
+                + unreadableNote(unreadableDirs[0]);
         if (matchedLines == 0) {
             return "没有找到“" + text + "”（搜索了 " + files.size() + " 个文件）" + skippedNote;
         }
@@ -344,24 +346,64 @@ final class FileTools {
         List<PathMatcher> matchers = globVariants(pattern).stream()
                 .map(variant -> FileSystems.getDefault().getPathMatcher("glob:" + variant))
                 .toList();
-        List<String> matches;
-        try (Stream<Path> paths = Files.walk(root)) {
-            matches = paths.filter(Files::isRegularFile)
-                    .map(root::relativize)
-                    .filter(path -> !isCredentialPath(path))
-                    .filter(path -> matchers.stream().anyMatch(matcher -> matcher.matches(path)))
-                    .map(path -> path.toString().replace('\\', '/'))
-                    .sorted()
-                    .toList();
-        }
+        int[] unreadableDirs = {0};
+        List<String> matches = regularFiles(root, unreadableDirs).stream()
+                .map(root::relativize)
+                .filter(path -> !isCredentialPath(path))
+                .filter(path -> matchers.stream().anyMatch(matcher -> matcher.matches(path)))
+                .map(path -> path.toString().replace('\\', '/'))
+                .sorted()
+                .toList();
         if (matches.isEmpty()) {
-            return "（没有匹配的文件）";
+            return "（没有匹配的文件）" + unreadableNote(unreadableDirs[0]);
         }
         List<String> shown = new ArrayList<>(matches.subList(0, Math.min(MAX_GLOB_RESULTS, matches.size())));
         if (matches.size() > MAX_GLOB_RESULTS) {
             shown.add("...（共 " + matches.size() + " 个，请缩小匹配范围）");
         }
-        return String.join("\n", shown);
+        return String.join("\n", shown) + unreadableNote(unreadableDirs[0]);
+    }
+
+    // glob 和 grep 共用的目录遍历，和 Files.walk 一样不跟随目录链接，返回其中的普通文件（含指向文件的链接）。
+    // Files.walk 遇到读不了的子目录（例如 Docker 卷留下的 root 目录）会在迭代中抛 UncheckedIOException，
+    // 让整次调用失败；这里跳过这些目录并计数，其余结果照常返回。起点本身读不了时仍然抛 IOException。
+    private static List<Path> regularFiles(Path start, int[] unreadableDirs) throws IOException {
+        List<Path> files = new ArrayList<>();
+        Files.walkFileTree(start, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) {
+                if (Files.isRegularFile(file)) {
+                    files.add(file);
+                }
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFileFailed(Path file, IOException exception) throws IOException {
+                if (file.equals(start)) {
+                    throw exception;
+                }
+                unreadableDirs[0]++;
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path dir, IOException exception) throws IOException {
+                // 目录打开了但中途读失败：同样跳过剩下的部分，不让整次遍历失败。
+                if (exception != null) {
+                    if (dir.equals(start)) {
+                        throw exception;
+                    }
+                    unreadableDirs[0]++;
+                }
+                return FileVisitResult.CONTINUE;
+            }
+        });
+        return files;
+    }
+
+    private static String unreadableNote(int unreadableDirs) {
+        return unreadableDirs == 0 ? "" : "\n（跳过 " + unreadableDirs + " 个没有权限读取的目录）";
     }
 
     // Java 的 **/ 至少匹配一层目录，而 Python 的 ** 可以匹配零层。
