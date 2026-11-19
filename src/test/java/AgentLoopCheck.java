@@ -54,6 +54,7 @@ public class AgentLoopCheck {
             checkTeam();
             checkRecovery(root);
             checkGrep();
+            checkUnreadableDirectory();
             checkHttpRoundTrip(root);
             System.out.println("Agent Loop checks passed (local HTTP only, no real API calls)");
         } finally {
@@ -1028,6 +1029,51 @@ public class AgentLoopCheck {
             checkToolError(agent.executeTool("grep", JSON.parseObject("{\"pattern\":\"[\",\"regex\":true}")), "错误的正则");
             checkToolError(agent.executeTool("grep", JSON.parseObject("{\"pattern\":\"x\",\"path\":\"..\"}")), "项目外的路径");
         } finally {
+            try (var paths = Files.walk(project)) {
+                for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                    Files.deleteIfExists(path);
+                }
+            }
+        }
+    }
+
+    private static void checkUnreadableDirectory() throws Exception {
+        // 项目里有读不了的子目录（例如 Docker 卷留下的 root 目录）时，glob 和 grep 应跳过它并说明，而不是让整个 agent 退出。
+        Path project = Files.createTempDirectory("agent4j-unreadable-");
+        Path locked = project.resolve("locked");
+        try {
+            Files.writeString(project.resolve("a.txt"), "hello\n", StandardCharsets.UTF_8);
+            Files.createDirectories(locked);
+            Files.writeString(locked.resolve("b.txt"), "hello\n", StandardCharsets.UTF_8);
+            try {
+                Files.setPosixFilePermissions(locked, java.util.Set.of());
+            } catch (UnsupportedOperationException exception) {
+                System.out.println("跳过不可读目录检查：文件系统不支持 POSIX 权限");
+                return;
+            }
+            try (var listing = Files.list(locked)) {
+                listing.count();
+                // 以 root 运行时权限不生效，目录仍然能读，这项检查没有意义。
+                System.out.println("跳过不可读目录检查：当前用户不受目录权限限制（可能是 root）");
+                return;
+            } catch (java.nio.file.AccessDeniedException expected) {
+                // 目录确实读不了，继续检查。
+            }
+            Main agent = new Main(TEST_KEY, UNUSED_ENDPOINT, "test-model", project);
+            String globbed = agent.executeTool("glob", JSON.parseObject("{\"pattern\":\"**/*.txt\"}"));
+            check(globbed.startsWith("a.txt") && globbed.contains("跳过 1 个没有权限读取的目录"),
+                    "glob 应跳过读不了的目录并返回其余结果: " + globbed);
+            String grepped = agent.executeTool("grep", JSON.parseObject("{\"pattern\":\"hello\"}"));
+            check(grepped.contains("a.txt:1: hello") && grepped.contains("跳过 1 个没有权限读取的目录"),
+                    "grep 应跳过读不了的目录并返回其余结果: " + grepped);
+            checkToolError(agent.executeTool("grep", JSON.parseObject("{\"pattern\":\"hello\",\"path\":\"locked\"}")),
+                    "直接搜索读不了的目录");
+        } finally {
+            try {
+                Files.setPosixFilePermissions(locked, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+            } catch (UnsupportedOperationException exception) {
+                // Windows 上没有改过权限，不用恢复。
+            }
             try (var paths = Files.walk(project)) {
                 for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
                     Files.deleteIfExists(path);

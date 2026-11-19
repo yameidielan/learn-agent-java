@@ -916,6 +916,9 @@ public class Main {
             return "工具错误: " + exception.getMessage();
         } catch (IOException exception) {
             return "工具错误: 文件操作失败：" + exception;
+        } catch (RuntimeException exception) {
+            // 兜底：工具里漏掉的未检查异常（如 UncheckedIOException）也作为错误交给模型，不让整个 agent 退出。
+            return "工具错误: " + exception;
         }
     }
 
